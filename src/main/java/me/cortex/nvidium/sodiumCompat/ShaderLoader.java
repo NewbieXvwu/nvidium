@@ -51,7 +51,6 @@ public class ShaderLoader {
         builder.add("TEXTURE_MAX_SCALE", String.valueOf(NvidiumCompactChunkVertex.TEXTURE_MAX_VALUE));
         constantBuilder.accept(builder);
 
-        var shaderSrc = net.caffeinemc.mods.sodium.client.gl.shader.ShaderLoader.getShaderSource(path);
-        return ShaderParser.parseShader(shaderSrc, builder.build()).src();
+        return ShaderParser.parseShader("#import <"+path.getNamespace()+":"+path.getPath()+">", builder.build());
     }
 }

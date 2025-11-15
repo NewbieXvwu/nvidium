@@ -3,7 +3,6 @@ package me.cortex.nvidium.managers;
 import it.unimi.dsi.fastutil.longs.*;
 import me.cortex.nvidium.Nvidium;
 import me.cortex.nvidium.NvidiumWorldRenderer;
-import me.cortex.nvidium.config.TranslucencySortingLevel;
 import me.cortex.nvidium.gl.RenderDevice;
 import me.cortex.nvidium.sodiumCompat.INvidiumWorldRendererGetter;
 import me.cortex.nvidium.sodiumCompat.IRepackagedResult;
@@ -77,10 +76,8 @@ public class SectionManager {
     }
 
     public void uploadChunkSort(ChunkSortOutput sortOutput) {
-        if (sortOutput.getSorter() == null) {
-            return;
-        }
-        NativeBuffer indexBuffer = sortOutput.getSorter().getIndexBuffer();
+        NativeBuffer indexBuffer = sortOutput.getIndexBuffer();
+        // Early exit
         if (indexBuffer == null) {
             return;
         }
@@ -93,9 +90,12 @@ public class SectionManager {
         }
 
         // Quick dirty integrity check to prevent race condition crash because translucencyQuadCounts can be overridden by an already reprocessed chunk
-        if (quadCountData[7] * 6 * 4 != indexBuffer.getLength()) {
-            LOGGER.error("ChunkSortOutput integrity check failed at {} {} {}, aborting (totalQuads={};indexBuffer={})",
-                    section.getChunkX(), section.getChunkY(), section.getChunkZ(), quadCountData[7], indexBuffer.getLength() / 24);
+        var totalQuads = 0;
+        for (var facing : ModelQuadFacing.values()) {
+            totalQuads += quadCountData[facing.ordinal()];
+        }
+        if (totalQuads * 6 * 4 != indexBuffer.getLength()) {
+            LOGGER.error("ChunkSortOutput integrity check failed, aborting (totalQuads={};indexBuffer={})", totalQuads, indexBuffer.getLength() / 24);
             return;
         }
 
@@ -147,15 +147,14 @@ public class SectionManager {
         // We need to store quadCount per ModelFacing to pad translucency sorting data
         var translucentData = result.meshes.get(DefaultTerrainRenderPasses.TRANSLUCENT);
         if (translucentData != null) {
-            int[] quadOffsets = new int[8];
-            for (int i = 0; i < ModelQuadFacing.COUNT; i++) {
-                var count = translucentData.getVertexSegments()[i * 2];
-                var facing = translucentData.getVertexSegments()[i * 2 + 1];
-                if (count > 0) {
-                    quadOffsets[facing] = count / 4;
-                    quadOffsets[7] += count / 4;
-                }
+            int[] quadOffsets = translucencyQuadCounts.get(sectionKey);
+            if (quadOffsets == null) {
+                quadOffsets = new int[]{0, 0, 0, 0, 0, 0, 0};
             }
+            for (var facing : ModelQuadFacing.VALUES) {
+                quadOffsets[facing.ordinal()] = translucentData.getVertexCounts()[facing.ordinal()] / 4;
+            }
+
             translucencyQuadCounts.put(sectionKey, quadOffsets);
         }
 
@@ -218,20 +217,6 @@ public class SectionManager {
             int geo = Short.toUnsignedInt(output.offsets()[i*2])|(Short.toUnsignedInt(output.offsets()[i*2+1])<<16);
             MemoryUtil.memPutInt(metadata, geo);
             metadata += 4;
-        }
-
-        // Reinject or free index data
-        if (Nvidium.config.translucency_sorting_level == TranslucencySortingLevel.SODIUM) {
-            if (result.isReusingUploadedIndexData()) {
-                MemoryUtil.memPutInt(metadata, this.section2index.get(sectionKey));
-            } else {
-                MemoryUtil.memPutInt(metadata, -1);
-
-                int idxIndex = this.section2index.remove(sectionKey);
-                if (idxIndex != -1) {
-                    this.translucencyIndexArena.free(idxIndex);
-                }
-            }
         }
     }
 

@@ -1,15 +1,15 @@
 package me.cortex.nvidium.renderers;
 
-import com.mojang.blaze3d.opengl.GlStateManager;
-import com.mojang.blaze3d.opengl.GlTexture;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.platform.GlStateManager;
 import me.cortex.nvidium.gl.shader.Shader;
 import me.cortex.nvidium.sodiumCompat.ShaderLoader;
-import me.cortex.nvidium.util.GPUTiming;
-import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
 import net.minecraft.client.Minecraft;
+import me.cortex.nvidium.util.FrameTimeProfiler;
 import net.minecraft.resources.ResourceLocation;
-import org.lwjgl.opengl.*;
+import me.cortex.nvidium.mixin.minecraft.LightTextureAccessor;
+import org.lwjgl.opengl.GL12C;
+import org.lwjgl.opengl.GL45;
+import org.lwjgl.opengl.GL45C;
 
 import static me.cortex.nvidium.RenderPipeline.GL_DRAW_INDIRECT_ADDRESS_NV;
 import static me.cortex.nvidium.gl.shader.ShaderType.*;
@@ -40,34 +40,30 @@ public class TranslucentTerrainRasterizer extends Phase {
         GL45C.glSamplerParameteri(lightSampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     }
 
-    private static void setTexture(GpuTextureView texView, int bindingPoint) {
-        GlTexture tex = (GlTexture) texView.texture();
-        GlStateManager._activeTexture(GL32C.GL_TEXTURE0 + bindingPoint);
-        GlStateManager._bindTexture(tex.glId());
-        GlStateManager._texParameter(GL32C.GL_TEXTURE_2D, 33084, texView.baseMipLevel());
-        GlStateManager._texParameter(GL32C.GL_TEXTURE_2D, 33085, texView.baseMipLevel() + texView.mipLevels() - 1);
-        tex.flushModeChanges(GL32C.GL_TEXTURE_2D);
+
+    private static void setTexture(int textureId, int bindingPoint) {
+        GlStateManager._activeTexture(33984 + bindingPoint);
+        GlStateManager._bindTexture(textureId);
     }
 
     //Translucency is rendered in a very cursed and incorrect way
     // it hijacks the unassigned indirect command dispatch and uses that to dispatch the translucent chunks as well
-    public void raster(TerrainRenderPass pass, int regionCount, long commandAddr, GPUTiming gpuTiming) {
+    public void raster(int regionCount, long commandAddr, FrameTimeProfiler frameTimeProfiler) {
         shader.bind();
 
-        GpuTextureView blockTexture = pass.getAtlas();
-        GpuTextureView lightTexture = Minecraft.getInstance().gameRenderer.lightTexture().getTextureView();
+        int blockId = Minecraft.getInstance().getTextureManager().getTexture(ResourceLocation.fromNamespaceAndPath("minecraft", "textures/atlas/blocks.png")).getId();
+        int lightId = ((LightTextureAccessor)Minecraft.getInstance().gameRenderer.lightTexture()).getLightTexture().getId();
 
         GL45C.glBindSampler(0, blockSampler);
         GL45C.glBindSampler(1, lightSampler);
-        setTexture(blockTexture, 0);
-        setTexture(lightTexture, 1);
+        setTexture(blockId, 0);
+        setTexture(lightId, 1);
 
         //the +8*6 is to offset to the unassigned dispatch
         glBufferAddressRangeNV(GL_DRAW_INDIRECT_ADDRESS_NV, 0, commandAddr, regionCount*8L);//Bind the command buffer
-        gpuTiming.marker();
+        frameTimeProfiler.startQuery();
         glMultiDrawMeshTasksIndirectNV( 0, regionCount, 0);
-        gpuTiming.marker();
-        gpuTiming.tick();
+        frameTimeProfiler.endQuery();
         GL45C.glBindSampler(0, 0);
         GL45C.glBindSampler(1, 0);
     }
