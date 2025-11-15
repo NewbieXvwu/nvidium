@@ -1,6 +1,5 @@
 package me.cortex.nvidium;
 
-import me.cortex.nvidium.config.TranslucencySortingLevel;
 import me.cortex.nvidium.gl.RenderDevice;
 import me.cortex.nvidium.managers.AsyncOcclusionTracker;
 import me.cortex.nvidium.managers.SectionManager;
@@ -13,10 +12,8 @@ import net.caffeinemc.mods.sodium.client.render.chunk.RenderSection;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.BuilderTaskOutput;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkBuildOutput;
 import net.caffeinemc.mods.sodium.client.render.chunk.compile.ChunkSortOutput;
-import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
 import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.ChunkMeshFormats;
 import net.caffeinemc.mods.sodium.client.render.viewport.Viewport;
-import net.caffeinemc.mods.sodium.client.util.FogParameters;
 import net.minecraft.client.Camera;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
 import org.jetbrains.annotations.Nullable;
@@ -80,8 +77,8 @@ public class NvidiumWorldRenderer {
         renderPipeline.reloadShaders();
     }
 
-    public void renderFrame(TerrainRenderPass pass, Viewport viewport, FogParameters fogParameters, ChunkRenderMatrices matrices, double x, double y, double z) {
-        renderPipeline.renderFrame(pass, viewport, fogParameters, matrices, x, y, z);
+    public void renderFrame(Viewport viewport, ChunkRenderMatrices matrices, double x, double y, double z) {
+        renderPipeline.renderFrame(viewport, matrices, x, y, z);
 
         while (sectionManager.terrainAreana.getUsedMB() > (max_geometry_memory - 100)) {
             renderPipeline.removeARegion();
@@ -93,8 +90,8 @@ public class NvidiumWorldRenderer {
         }
     }
 
-    public void renderTranslucent(TerrainRenderPass pass) {
-        this.renderPipeline.renderTranslucent(pass);
+    public void renderTranslucent() {
+        this.renderPipeline.renderTranslucent();
     }
 
     public void deleteSection(RenderSection section) {
@@ -105,9 +102,7 @@ public class NvidiumWorldRenderer {
         if (buildOutput instanceof ChunkBuildOutput chunkBuildOutput) {
             this.sectionManager.uploadChunkBuildResult(chunkBuildOutput);
         }
-        if (buildOutput instanceof ChunkSortOutput chunkSortOutput &&
-                !chunkSortOutput.isReusingUploadedIndexData() &&
-                Nvidium.config.translucency_sorting_level == TranslucencySortingLevel.SODIUM) {
+        if (buildOutput instanceof ChunkSortOutput chunkSortOutput) {
             this.sectionManager.uploadChunkSort(chunkSortOutput);
         }
     }

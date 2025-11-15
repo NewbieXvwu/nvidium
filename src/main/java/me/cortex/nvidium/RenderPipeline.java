@@ -1,5 +1,7 @@
 package me.cortex.nvidium;
 
+import com.mojang.blaze3d.platform.GlStateManager;
+import com.mojang.blaze3d.systems.RenderSystem;
 import it.unimi.dsi.fastutil.ints.*;
 import me.cortex.nvidium.config.StatisticsLoggingLevel;
 import me.cortex.nvidium.config.TranslucencySortingLevel;
@@ -10,16 +12,17 @@ import me.cortex.nvidium.managers.RegionVisibilityTracker;
 import me.cortex.nvidium.managers.SectionManager;
 import me.cortex.nvidium.mixin.minecraft.TextureAtlasAccessor;
 import me.cortex.nvidium.renderers.*;
-import me.cortex.nvidium.util.*;
+import me.cortex.nvidium.util.DownloadTaskStream;
+import me.cortex.nvidium.util.FrameTimeProfiler;
+import me.cortex.nvidium.util.TickableManager;
+import me.cortex.nvidium.util.UploadingBufferStream;
 import net.caffeinemc.mods.sodium.client.SodiumClientMod;
 import net.caffeinemc.mods.sodium.client.gl.device.GLRenderDevice;
 import net.caffeinemc.mods.sodium.client.render.chunk.ChunkRenderMatrices;
-import net.caffeinemc.mods.sodium.client.render.chunk.terrain.TerrainRenderPass;
-import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.impl.CompactChunkVertex;
 import net.caffeinemc.mods.sodium.client.render.viewport.Viewport;
-import net.caffeinemc.mods.sodium.client.util.FogParameters;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.texture.TextureAtlas;
+import net.caffeinemc.mods.sodium.client.render.chunk.vertex.format.impl.CompactChunkVertex;
 import org.joml.*;
 import org.lwjgl.opengl.GL11C;
 import org.lwjgl.system.MemoryUtil;
@@ -65,6 +68,7 @@ public class RenderPipeline {
                     4*4*4 + // mat4      MVPInv (Optional)
                     4*4 +   // ivec4     chunkPosition
                     4*4 +   // vec4      subchunkOffset
+                    4*4 +   // vec4      fogColour
                     8 +     // uint16_t  *regionIndicies
                     8 +     // Region    *regionData
                     8 +     // Section   *sectionData
@@ -79,10 +83,10 @@ public class RenderPipeline {
                     8 +     // uint64_t  *originArray
                     8 +     // uint32_t  *statistics_buffe
                     4*2 +   // vec2      screenSize
-                    4*4 +   // vec4      fogColour
-                    2*4 +   // vec2      environmentFog
-                    2*4 +   // vec2      renderFog
                     4*2 +   // vec2      texCoordShrink
+                    4 +     // float     fogStart
+                    4 +     // float     fogEnd
+                    4 +     // bool      isCylindricalFog
                     4 +     // uint      flags
                     2 +     // uint16_t  regionCount
                     1       // uint8_t   frameId
@@ -111,9 +115,8 @@ public class RenderPipeline {
     }
 
     private final Statistics stats;
-
-    private final GPUTiming primaryTiming = new GPUTiming();
-    private final GPUTiming translucentTiming = new GPUTiming();
+    private final FrameTimeProfiler primaryFrameTimeProfiler = new FrameTimeProfiler(100);
+    private final FrameTimeProfiler transluscentFrameTimeProfiler = new FrameTimeProfiler(100);
 
     public RenderPipeline(RenderDevice device, UploadingBufferStream uploadStream, DownloadTaskStream downloadStream, SectionManager sectionManager) {
         this.device = device;
@@ -189,8 +192,7 @@ public class RenderPipeline {
 
     //TODO FIXME: regions that where in frustum but are now out of frustum must have the visibility data cleared
     // this is due to funny issue of pain where the section was "visible" last frame cause it didnt get ticked
-    //NOTE: can use any of the command list rendering commands to basicly draw X indirects using the same shader, thus allowing for terrain to be rendered very efficently
-    public void renderFrame(TerrainRenderPass pass, Viewport frustum, FogParameters fogParameters, ChunkRenderMatrices crm, double px, double py, double pz) {
+    public void renderFrame(Viewport frustum, ChunkRenderMatrices crm, double px, double py, double pz) {//NOTE: can use any of the command list rendering commands to basicly draw X indirects using the same shader, thus allowing for terrain to be rendered very efficently
 
         if (sectionManager.getRegionManager().regionCount() == 0) return;//Dont render anything if there is nothing to render
 
@@ -303,6 +305,8 @@ public class RenderPipeline {
             addr += 16;
             new Vector4f(delta,0).getToAddress(addr);//Subchunk offset (note, delta is already negated)
             addr += 16;
+            new Vector4f(RenderSystem.getShaderFogColor()).getToAddress(addr);
+            addr += 16;
             MemoryUtil.memPutLong(addr, sceneUniform.getDeviceAddress() + SCENE_SIZE);//Put in the location of the region indexs
             addr += 8;
             MemoryUtil.memPutLong(addr, sectionManager.getRegionManager().getRegionBufferAddress());
@@ -334,15 +338,15 @@ public class RenderPipeline {
             addr += 4;
             MemoryUtil.memPutFloat(addr, ((float)screenHeight)/2);
             addr += 4;
-            new Vector4f(fogParameters.red(), fogParameters.green(), fogParameters.blue(), fogParameters.alpha()).getToAddress(addr);
-            addr += 16;
-            new Vector2f(fogParameters.environmentalStart(), fogParameters.environmentalEnd()).getToAddress(addr);
-            addr += 8;
-            new Vector2f(fogParameters.renderStart(), fogParameters.renderEnd()).getToAddress(addr);
-            addr += 8;
             MemoryUtil.memPutFloat(addr, subTexelWidth);
             addr += 4;
             MemoryUtil.memPutFloat(addr, subTexelHeight);
+            addr += 4;
+            MemoryUtil.memPutFloat(addr, RenderSystem.getShaderFogStart());//FogStart
+            addr += 4;
+            MemoryUtil.memPutFloat(addr, RenderSystem.getShaderFogEnd());//FogEnd
+            addr += 4;
+            MemoryUtil.memPutInt(addr, RenderSystem.getShaderFogShape().getIndex());//IsSphericalFog
             addr += 4;
             int flags = 0;
             flags |= SodiumClientMod.options().performance.useBlockFaceCulling?1:0;
@@ -387,7 +391,7 @@ public class RenderPipeline {
 
         if (prevRegionCount != 0) {
             glEnable(GL_DEPTH_TEST);
-            terrainRasterizer.raster(pass, prevRegionCount, terrainCommandBuffer.getDeviceAddress(), primaryTiming);
+            terrainRasterizer.raster(prevRegionCount, terrainCommandBuffer.getDeviceAddress(), primaryFrameTimeProfiler);
             glMemoryBarrier(GL_FRAMEBUFFER_BARRIER_BIT);
         }
 
@@ -437,7 +441,7 @@ public class RenderPipeline {
         //Do temporal rasterization
         if (Nvidium.config.enable_temporal_coherence) {
             glMemoryBarrier(GL_COMMAND_BARRIER_BIT);
-            temporalRasterizer.raster(pass, visibleRegions, terrainCommandBuffer.getDeviceAddress());
+            temporalRasterizer.raster(visibleRegions, terrainCommandBuffer.getDeviceAddress());
         }
 
 
@@ -466,6 +470,8 @@ public class RenderPipeline {
         glDisableClientState(GL_ELEMENT_ARRAY_UNIFIED_NV);
         glDisableClientState(GL_DRAW_INDIRECT_UNIFIED_NV);
         glDepthFunc(GL11C.GL_LEQUAL);
+        glDisable(GL_DEPTH_TEST);
+
 
         //if ((err = glGetError()) != 0) {
         //    throw new IllegalStateException("GLERROR: "+err);
@@ -492,7 +498,7 @@ public class RenderPipeline {
 
     //Translucency is rendered in a very cursed and incorrect way
     // it hijacks the unassigned indirect command dispatch and uses that to dispatch the translucent chunks as well
-    public void renderTranslucent(TerrainRenderPass pass) {
+    public void renderTranslucent() {
         glEnableClientState(GL_UNIFORM_BUFFER_UNIFIED_NV);
         glEnableClientState(GL_VERTEX_ATTRIB_ARRAY_UNIFIED_NV);
         glEnableClientState(GL_ELEMENT_ARRAY_UNIFIED_NV);
@@ -503,7 +509,12 @@ public class RenderPipeline {
         //Translucency sorting
         {
             glEnable(GL_DEPTH_TEST);
-            translucencyTerrainRasterizer.raster(pass, prevRegionCount, translucencyCommandBuffer.getDeviceAddress(), translucentTiming);
+            RenderSystem.enableBlend();
+            RenderSystem.blendFuncSeparate(GlStateManager.SourceFactor.SRC_ALPHA, GlStateManager.DestFactor.ONE_MINUS_SRC_ALPHA, GlStateManager.SourceFactor.ONE, GlStateManager.DestFactor.ONE_MINUS_SRC_ALPHA);
+            translucencyTerrainRasterizer.raster(prevRegionCount, translucencyCommandBuffer.getDeviceAddress(), transluscentFrameTimeProfiler);
+            RenderSystem.disableBlend();
+            RenderSystem.defaultBlendFunc();
+            glDisable(GL_DEPTH_TEST);
         }
 
         glDisableClientState(GL_UNIFORM_BUFFER_UNIFIED_NV);
@@ -553,9 +564,6 @@ public class RenderPipeline {
         this.transformationArray.delete();
         this.originOffsetArray.delete();
 
-        this.primaryTiming.free();
-        this.translucentTiming.free();
-
         if (statisticsBuffer != null) {
             statisticsBuffer.delete();
         }
@@ -582,8 +590,8 @@ public class RenderPipeline {
             }
             info.addAll(List.of(builder.toString().split("\n")));
         }
-        info.add("Primary frame time: " +  String.format("%.03f", primaryTiming.getAverageMs()) + "ms");
-        info.add("Translucent frame time: " +  String.format("%.03f", translucentTiming.getAverageMs()) + "ms");
+        info.add("Primary frame time: " +  String.format("%.03f", primaryFrameTimeProfiler.getAverageMs()) + "ms");
+        info.add("Translucent frame time: " +  String.format("%.03f", transluscentFrameTimeProfiler.getAverageMs()) + "ms");
     }
 
     public void reloadShaders() {
